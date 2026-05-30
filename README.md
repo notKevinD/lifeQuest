@@ -33,21 +33,33 @@ CREATE DATABASE questlife;
 Jalankan aplikasi:
 
 ```bash
-PORT=3000 \
-DB_USER=postgres \
-DB_HOST=localhost \
-DB_NAME=questlife \
-DB_PASSWORD='password_postgres_anda' \
-DB_PORT=5432 \
-JWT_SECRET='isi_dengan_secret_panjang' \
 npm start
+```
+
+Konfigurasi dibaca dari file `.env`. Buat file `.env` dari contoh:
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Contoh isi `.env`:
+
+```env
+PORT=3000
+DB_USER=kevindar
+DB_HOST=localhost
+DB_NAME=questlife
+DB_PASSWORD=Kevin123
+DB_PORT=5432
+JWT_SECRET=ganti_dengan_secret_panjang_random
 ```
 
 ## Deploy dengan PM2
 
 ```bash
 sudo npm install -g pm2
-PORT=3000 DB_USER=postgres DB_HOST=localhost DB_NAME=questlife DB_PASSWORD='password_postgres_anda' DB_PORT=5432 JWT_SECRET='isi_dengan_secret_panjang' pm2 start server.js --name questlife
+pm2 start server.js --name questlife
 pm2 startup
 pm2 save
 ```
