@@ -305,7 +305,7 @@ app.get('/', (req, res) => {
             const [quests, setQuests] = useState([]);
             const [rewards, setRewards] = useState([]);
             const [logs, setLogs] = useState([]);
-            const [activeTab, setActiveTab] = useState('quests');
+            const [activeTab, setActiveTab] = useState('dashboard');
             const [syncing, setSyncing] = useState(false);
             const [notification, setNotification] = useState(null);
 
@@ -324,6 +324,16 @@ app.get('/', (req, res) => {
                 setNotification(msg);
                 setTimeout(() => setNotification(null), 3000);
             };
+
+            const getDateLabel = (date = new Date()) => {
+                return date.toLocaleDateString('id-ID', { day: '2-digit', month: 'short' });
+            };
+
+            const createSystemLog = (text) => ({
+                id: Date.now().toString(),
+                text,
+                time: getDateLabel()
+            });
 
             // Capture PWA Install Prompt
             useEffect(() => {
@@ -464,7 +474,7 @@ app.get('/', (req, res) => {
                 };
 
                 const updatedQ = [newQ, ...quests];
-                const updatedLogs = [{ id: Date.now().toString(), text: `Menerima Quest: "${newQuestTitle}"`, time: 'Sistem' }, ...logs];
+                const updatedLogs = [createSystemLog('Menerima Quest: "' + newQuestTitle + '"'), ...logs];
                 
                 updateAndSave(player, updatedQ, rewards, updatedLogs);
                 setNewQuestTitle('');
@@ -485,9 +495,9 @@ app.get('/', (req, res) => {
                     newXp -= xpNeeded;
                     newLevel += 1;
                     xpNeeded = Math.round(xpNeeded * 1.2);
-                    triggerNotification("🎉 TAHNIAH! LEVEL UP!");
+                    triggerNotification("Level up!");
                 } else {
-                    triggerNotification(`Quest Selesai! +${quest.xp} XP`);
+                    triggerNotification('Quest Selesai! +' + quest.xp + ' XP');
                 }
 
                 const statToUp = quest.type.toLowerCase();
@@ -504,7 +514,7 @@ app.get('/', (req, res) => {
                     stats: updatedStats
                 };
 
-                const updatedLogs = [{ id: Date.now().toString(), text: `Selesai: "${quest.title}" (+${quest.xp}XP)`, time: 'Sistem' }, ...logs];
+                const updatedLogs = [createSystemLog('Selesai: "' + quest.title + '" (+' + quest.xp + 'XP)'), ...logs];
                 updateAndSave(updatedPlayer, updatedQuests, rewards, updatedLogs);
             };
 
@@ -519,7 +529,7 @@ app.get('/', (req, res) => {
                 let logText = "Hukuman: Mengabaikan kebiasaan harian (-15 HP)";
 
                 if (nextHp <= 0) {
-                    logText = "💀 Karakter pingsan! Denda 20 Gold untuk penyembuhan.";
+                    logText = "Karakter pingsan! Denda 20 Gold untuk penyembuhan.";
                     updatedPlayer = {
                         ...player, hp: 30, gold: Math.max(0, player.gold - 20)
                     };
@@ -528,7 +538,7 @@ app.get('/', (req, res) => {
                     triggerNotification("Aduh! HP berkurang.");
                 }
 
-                const updatedLogs = [{ id: Date.now().toString(), text: logText, time: 'Sistem' }, ...logs];
+                const updatedLogs = [createSystemLog(logText), ...logs];
                 updateAndSave(updatedPlayer, quests, rewards, updatedLogs);
             };
 
@@ -562,7 +572,7 @@ app.get('/', (req, res) => {
 
                 const updatedPlayer = { ...player, gold: player.gold - reward.cost };
                 const updatedR = rewards.map(r => r.id === id ? { ...r, count: r.count + 1 } : r);
-                const updatedLogs = [{ id: Date.now().toString(), text: `Menebus Ganjaran: "${reward.title}" (-${reward.cost}G)`, time: 'Sistem' }, ...logs];
+                const updatedLogs = [createSystemLog('Menebus Ganjaran: "' + reward.title + '" (-' + reward.cost + 'G)'), ...logs];
 
                 updateAndSave(updatedPlayer, quests, updatedR, updatedLogs);
                 triggerNotification("Berhasil ditukarkan!");
@@ -575,10 +585,37 @@ app.get('/', (req, res) => {
 
             const resetDailyQuests = () => {
                 const updatedQ = quests.map(q => ({ ...q, completedToday: false }));
-                const updatedLogs = [{ id: Date.now().toString(), text: "Hari baru dimulai! Semua Quest Harian telah di-reset.", time: 'Sistem' }, ...logs];
+                const updatedLogs = [createSystemLog("Hari baru dimulai! Semua Quest Harian telah di-reset."), ...logs];
                 updateAndSave(player, updatedQ, rewards, updatedLogs);
                 triggerNotification("Semua quest harian di-reset!");
             };
+
+            const completedToday = quests.filter(q => q.completedToday).length;
+            const totalQuests = quests.length;
+            const completionRate = totalQuests ? Math.round((completedToday / totalQuests) * 100) : 0;
+            const xpProgress = Math.min(100, Math.round((player.xp / player.xpNeeded) * 100));
+            const hpProgress = Math.min(100, Math.round((player.hp / player.maxHp) * 100));
+            const completedLogs = logs.filter(log => log.text && log.text.startsWith('Selesai:'));
+            const rewardLogs = logs.filter(log => log.text && log.text.startsWith('Menebus Ganjaran:'));
+            const todayLabel = getDateLabel();
+            const todayLogCount = completedLogs.filter(log => log.time === todayLabel).length;
+            const streakScore = Math.min(7, completedToday + Math.min(3, todayLogCount));
+            const characterTitle = player.level >= 15 ? 'Mythic Hero' : player.level >= 10 ? 'Elite Adventurer' : player.level >= 5 ? 'Rising Knight' : 'Novice Adventurer';
+            const strongestStat = Object.entries(player.stats).sort((a, b) => b[1] - a[1])[0] || ['str', 10];
+            const sevenDays = Array.from({ length: 7 }, (_, index) => {
+                const date = new Date();
+                date.setDate(date.getDate() - (6 - index));
+                const label = getDateLabel(date);
+                const count = completedLogs.filter(log => log.time === label).length;
+                return { label, count };
+            });
+            const maxDayCount = Math.max(1, ...sevenDays.map(day => day.count), completedToday);
+            const achievements = [
+                { title: 'First Blood', desc: 'Quest pertama selesai', unlocked: completedLogs.length >= 1 },
+                { title: 'Level Climber', desc: 'Mencapai level 5', unlocked: player.level >= 5 },
+                { title: 'Gold Keeper', desc: 'Menyimpan 100 gold', unlocked: player.gold >= 100 },
+                { title: 'Balanced Day', desc: 'Minimal 50% quest harian selesai', unlocked: completionRate >= 50 && totalQuests > 0 }
+            ];
 
             // UI Render Login
             if (!token) {
@@ -633,7 +670,7 @@ app.get('/', (req, res) => {
 
             // Main UI
             return (
-                <div className="max-w-md mx-auto p-4 pb-24">
+                <div className="max-w-5xl mx-auto p-4 pb-24">
                     {notification && (
                         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-amber-500 text-slate-950 px-4 py-2.5 rounded-lg font-bold text-xs shadow-lg">
                             ✨ {notification}
@@ -681,7 +718,10 @@ app.get('/', (req, res) => {
                                 }}
                                 className="bg-transparent border-b border-transparent hover:border-slate-800 focus:border-amber-500 focus:outline-none font-black text-lg text-slate-200"
                             />
-                            <span className="bg-amber-500/10 border border-amber-500/30 text-amber-400 px-2 py-0.5 rounded font-mono text-xs font-bold">LVL {player.level}</span>
+                            <div className="text-right">
+                                <span className="bg-amber-500/10 border border-amber-500/30 text-amber-400 px-2 py-0.5 rounded font-mono text-xs font-bold">LVL {player.level}</span>
+                                <div className="text-[10px] text-slate-500 font-mono mt-1">{characterTitle}</div>
+                            </div>
                         </div>
 
                         {/* HP Bar */}
@@ -691,7 +731,7 @@ app.get('/', (req, res) => {
                                 <span className="font-mono">{player.hp}/{player.maxHp}</span>
                             </div>
                             <div className="h-2.5 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
-                                <div className="h-full bg-gradient-to-r from-red-600 to-rose-400 transition-all duration-300" style={{ width: `${(player.hp / player.maxHp) * 100}%` }}></div>
+                                <div className="h-full bg-gradient-to-r from-red-600 to-rose-400 transition-all duration-300" style={{ width: hpProgress + '%' }}></div>
                             </div>
                         </div>
 
@@ -702,12 +742,12 @@ app.get('/', (req, res) => {
                                 <span className="font-mono">{player.xp}/{player.xpNeeded} XP</span>
                             </div>
                             <div className="h-2.5 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
-                                <div className="h-full bg-gradient-to-r from-emerald-600 to-green-400 transition-all duration-300" style={{ width: `${(player.xp / player.xpNeeded) * 100}%` }}></div>
+                                <div className="h-full bg-gradient-to-r from-emerald-600 to-green-400 transition-all duration-300" style={{ width: xpProgress + '%' }}></div>
                             </div>
                         </div>
 
                         {/* Gold & Penalty */}
-                        <div className="grid grid-cols-2 gap-3 pt-3 border-t border-slate-800/80">
+                        <div className="grid grid-cols-3 gap-3 pt-3 border-t border-slate-800/80">
                             <div className="bg-slate-950 rounded-lg p-2 flex items-center gap-2 border border-slate-800/60">
                                 <Icons.Coins />
                                 <div>
@@ -718,8 +758,80 @@ app.get('/', (req, res) => {
                             <button onClick={applyPenalty} className="bg-red-950/30 border border-red-900/40 hover:border-red-600 text-red-300 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5">
                                 Gagal Habit (-15HP)
                             </button>
+                            <div className="bg-slate-950 rounded-lg p-2 border border-slate-800/60">
+                                <div className="text-[9px] text-slate-500 uppercase font-mono font-bold">Stat Utama</div>
+                                <div className="text-sm font-black text-cyan-300 font-mono">{strongestStat[0].toUpperCase()} {strongestStat[1]}</div>
+                            </div>
                         </div>
                     </div>
+
+                    {/* ================= TAB 0: DASHBOARD ================= */}
+                    {activeTab === 'dashboard' && (
+                        <div className="grid lg:grid-cols-[1.35fr_0.85fr] gap-4 mb-6">
+                            <div className="space-y-4">
+                                <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
+                                    <div className="flex items-center justify-between mb-4 gap-3">
+                                        <div>
+                                            <h2 className="text-sm font-black text-slate-100 uppercase tracking-wider">Progress 7 Hari</h2>
+                                            <p className="text-xs text-slate-500">Jumlah quest selesai per hari</p>
+                                        </div>
+                                        <span className="text-xs font-mono text-amber-300 bg-amber-500/10 border border-amber-500/30 px-2 py-1 rounded">{completionRate}% hari ini</span>
+                                    </div>
+                                    <div className="h-44 flex items-end gap-2 border-b border-slate-800 pb-2">
+                                        {sevenDays.map((day, index) => (
+                                            <div key={day.label + index} className="flex-1 flex flex-col items-center gap-2 min-w-0">
+                                                <div className="w-full bg-slate-950 border border-slate-800 rounded-t-lg overflow-hidden flex items-end" style={{ height: '132px' }}>
+                                                    <div className="w-full bg-gradient-to-t from-cyan-500 to-amber-300 transition-all duration-500" style={{ height: Math.max(8, (day.count / maxDayCount) * 100) + '%', opacity: day.count ? 1 : 0.22 }}></div>
+                                                </div>
+                                                <div className="text-[10px] text-slate-500 font-mono truncate">{day.label}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="grid sm:grid-cols-3 gap-3">
+                                    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                                        <div className="text-[10px] uppercase font-mono text-slate-500 font-bold">Quest selesai</div>
+                                        <div className="text-2xl font-black text-emerald-300">{completedLogs.length}</div>
+                                    </div>
+                                    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                                        <div className="text-[10px] uppercase font-mono text-slate-500 font-bold">Reward ditebus</div>
+                                        <div className="text-2xl font-black text-amber-300">{rewardLogs.length}</div>
+                                    </div>
+                                    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                                        <div className="text-[10px] uppercase font-mono text-slate-500 font-bold">Quest aktif</div>
+                                        <div className="text-2xl font-black text-cyan-300">{quests.filter(q => !q.completedToday).length}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="space-y-4">
+                                <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                                    <h2 className="text-sm font-black text-slate-100 uppercase tracking-wider mb-3">Achievement</h2>
+                                    <div className="space-y-2">
+                                        {achievements.map(item => (
+                                            <div key={item.title} className={'border rounded-lg p-3 ' + (item.unlocked ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-slate-950 border-slate-800 opacity-70')}>
+                                                <div className={'text-xs font-black ' + (item.unlocked ? 'text-emerald-300' : 'text-slate-400')}>{item.title}</div>
+                                                <div className="text-[10px] text-slate-500">{item.desc}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                                    <h2 className="text-sm font-black text-slate-100 uppercase tracking-wider mb-3">Aktivitas Terbaru</h2>
+                                    <div className="space-y-2 max-h-48 overflow-y-auto">
+                                        {logs.slice(0, 6).map(log => (
+                                            <div key={log.id} className="bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs">
+                                                <span className="text-amber-400 font-mono">[{log.time}]</span> <span className="text-slate-300">{log.text}</span>
+                                            </div>
+                                        ))}
+                                        {logs.length === 0 && <div className="text-xs text-slate-500">Belum ada aktivitas.</div>}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {/* ================= TAB 1: QUESTS ================= */}
                     {activeTab === 'quests' && (
@@ -751,7 +863,7 @@ app.get('/', (req, res) => {
 
                             <div className="space-y-2">
                                 {quests.map(q => (
-                                    <div key={q.id} className={`bg-slate-900 border border-slate-800 p-3 rounded-xl flex items-center justify-between gap-3 ${q.completedToday ? 'opacity-40 line-through' : ''}`}>
+                                    <div key={q.id} className={'bg-slate-900 border border-slate-800 p-3 rounded-xl flex items-center justify-between gap-3 ' + (q.completedToday ? 'opacity-40 line-through' : '')}>
                                         <div>
                                             <p className="text-xs font-bold text-slate-200">{q.title}</p>
                                             <span className="text-[9px] text-amber-500 font-mono font-bold">+{q.xp} XP | +{q.gold} G | {q.type}</span>
@@ -834,10 +946,11 @@ app.get('/', (req, res) => {
 
                     {/* Bottom Nav Bar */}
                     <nav className="fixed bottom-0 left-0 right-0 bg-slate-900 border-t border-slate-800 p-2 z-40">
-                        <div className="max-w-md mx-auto grid grid-cols-3 gap-1">
-                            <button onClick={() => setActiveTab('quests')} className={`py-1.5 text-center text-xs font-bold uppercase tracking-wider font-mono ${activeTab==='quests'?'text-amber-500':'text-slate-500'}`}>Quests</button>
-                            <button onClick={() => setActiveTab('rewards')} className={`py-1.5 text-center text-xs font-bold uppercase tracking-wider font-mono ${activeTab==='rewards'?'text-amber-500':'text-slate-500'}`}>Kedai</button>
-                            <button onClick={() => setActiveTab('profile')} className={`py-1.5 text-center text-xs font-bold uppercase tracking-wider font-mono ${activeTab==='profile'?'text-amber-500':'text-slate-500'}`}>Profil</button>
+                        <div className="max-w-md mx-auto grid grid-cols-4 gap-1">
+                            <button onClick={() => setActiveTab('dashboard')} className={'py-1.5 text-center text-xs font-bold uppercase tracking-wider font-mono ' + (activeTab==='dashboard'?'text-amber-500':'text-slate-500')}>Dashboard</button>
+                            <button onClick={() => setActiveTab('quests')} className={'py-1.5 text-center text-xs font-bold uppercase tracking-wider font-mono ' + (activeTab==='quests'?'text-amber-500':'text-slate-500')}>Quests</button>
+                            <button onClick={() => setActiveTab('rewards')} className={'py-1.5 text-center text-xs font-bold uppercase tracking-wider font-mono ' + (activeTab==='rewards'?'text-amber-500':'text-slate-500')}>Kedai</button>
+                            <button onClick={() => setActiveTab('profile')} className={'py-1.5 text-center text-xs font-bold uppercase tracking-wider font-mono ' + (activeTab==='profile'?'text-amber-500':'text-slate-500')}>Profil</button>
                         </div>
                     </nav>
                 </div>
