@@ -1,0 +1,15 @@
+{
+  "name": "QuestLife",
+  "short_name": "QuestLife",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1329",
+  "theme_color": "#f59e0b",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/3408/3408506.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
