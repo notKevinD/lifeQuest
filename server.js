@@ -315,7 +315,7 @@ app.get('/', (req, res) => {
 
             // Form Inputs
             const [newQuestTitle, setNewQuestTitle] = useState('');
-            const [newQuestType, setNewQuestType] = useState('STR');
+            const [newQuestType, setNewQuestType] = useState('AUTO');
             const [newQuestDiff, setNewQuestDiff] = useState('Sedang');
             const [newRewardTitle, setNewRewardTitle] = useState('');
             const [newRewardCost, setNewRewardCost] = useState('');
@@ -334,6 +334,21 @@ app.get('/', (req, res) => {
                 text,
                 time: getDateLabel()
             });
+
+            const inferQuestType = (title, selectedType) => {
+                if (selectedType !== 'AUTO') return selectedType;
+
+                const text = title.toLowerCase();
+                const rules = [
+                    { type: 'STR', words: ['olahraga', 'gym', 'lari', 'jalan', 'senam', 'push up', 'sit up', 'workout', 'fisik', 'sepeda'] },
+                    { type: 'INT', words: ['baca', 'membaca', 'belajar', 'coding', 'skripsi', 'tugas', 'riset', 'nulis', 'menulis', 'mandarin', 'hsk', 'kelas'] },
+                    { type: 'DEX', words: ['desain', 'edit', 'gambar', 'musik', 'latihan skill', 'praktik', 'presentasi', 'video', 'kreatif'] },
+                    { type: 'WIS', words: ['doa', 'renungan', 'ibadah', 'gereja', 'meditasi', 'jurnal', 'refleksi', 'tenang', 'tidur'] }
+                ];
+
+                const matched = rules.find(rule => rule.words.some(word => text.includes(word)));
+                return matched ? matched.type : 'INT';
+            };
 
             // Capture PWA Install Prompt
             useEffect(() => {
@@ -465,10 +480,12 @@ app.get('/', (req, res) => {
                 if (newQuestDiff === 'Sedang') { xp = 20; gold = 10; }
                 else if (newQuestDiff === 'Sulit') { xp = 40; gold = 20; }
 
+                const questType = inferQuestType(newQuestTitle, newQuestType);
+
                 const newQ = {
                     id: Date.now().toString(),
                     title: newQuestTitle,
-                    type: newQuestType,
+                    type: questType,
                     difficulty: newQuestDiff,
                     xp, gold, completedToday: false
                 };
@@ -500,7 +517,7 @@ app.get('/', (req, res) => {
                     triggerNotification('Quest Selesai! +' + quest.xp + ' XP');
                 }
 
-                const statToUp = quest.type.toLowerCase();
+                const statToUp = (quest.type || inferQuestType(quest.title, 'AUTO')).toLowerCase();
                 const updatedStats = { ...player.stats };
                 updatedStats[statToUp] = (updatedStats[statToUp] || 10) + 1;
 
@@ -847,6 +864,7 @@ app.get('/', (req, res) => {
                                 />
                                 <div className="grid grid-cols-3 gap-2">
                                     <select value={newQuestType} onChange={e => setNewQuestType(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-lg text-[10px] font-bold p-1.5 text-amber-500">
+                                        <option value="AUTO">Auto Stat</option>
                                         <option value="STR">💪 STR (Fizikal)</option>
                                         <option value="INT">🧠 INT (Minda)</option>
                                         <option value="DEX">⚡ DEX (Kreatif)</option>
