@@ -271,6 +271,19 @@ app.get('/', (req, res) => {
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @keyframes bossPulse {
+            0%, 100% { box-shadow: 0 0 0 rgba(239, 68, 68, 0); }
+            50% { box-shadow: 0 0 28px rgba(239, 68, 68, 0.22); }
+        }
+        @keyframes victoryPop {
+            0% { transform: scale(0.96); opacity: 0.7; }
+            70% { transform: scale(1.02); opacity: 1; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .boss-active { animation: bossPulse 2.2s ease-in-out infinite; }
+        .boss-defeated { animation: victoryPop 0.45s ease-out; }
+    </style>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen">
 
@@ -504,6 +517,7 @@ app.get('/', (req, res) => {
                 if (!quest || quest.completedToday) return;
 
                 const updatedQuests = quests.map(q => q.id === id ? { ...q, completedToday: true } : q);
+                const defeatsDailyBoss = updatedQuests.length > 0 && updatedQuests.every(q => q.completedToday);
 
                 let newXp = player.xp + quest.xp;
                 let newLevel = player.level;
@@ -534,6 +548,9 @@ app.get('/', (req, res) => {
 
                 const updatedLogs = [createSystemLog('Selesai: "' + quest.title + '" (+' + quest.xp + 'XP)'), ...logs];
                 updateAndSave(updatedPlayer, updatedQuests, rewards, updatedLogs);
+                if (defeatsDailyBoss) {
+                    triggerNotification('Daily Boss kalah! Klaim hadiah di Dashboard.');
+                }
             };
 
             const deleteQuest = (id) => {
@@ -617,6 +634,9 @@ app.get('/', (req, res) => {
             const rewardLogs = logs.filter(log => log.text && log.text.startsWith('Menebus Ganjaran:'));
             const todayLabel = getDateLabel();
             const todayLogCount = completedLogs.filter(log => log.time === todayLabel).length;
+            const bossDefeated = totalQuests > 0 && completedToday === totalQuests;
+            const bossHp = totalQuests ? Math.max(0, 100 - completionRate) : 100;
+            const bossRewardClaimed = logs.some(log => log.time === todayLabel && log.text === 'Bonus Daily Boss diklaim');
             const streakScore = Math.min(7, completedToday + Math.min(3, todayLogCount));
             const characterTitle = player.level >= 15 ? 'Mythic Hero' : player.level >= 10 ? 'Elite Adventurer' : player.level >= 5 ? 'Rising Knight' : 'Novice Adventurer';
             const strongestStat = Object.entries(player.stats).sort((a, b) => b[1] - a[1])[0] || ['str', 10];
@@ -634,6 +654,33 @@ app.get('/', (req, res) => {
                 { title: 'Gold Keeper', desc: 'Menyimpan 100 gold', unlocked: player.gold >= 100 },
                 { title: 'Balanced Day', desc: 'Minimal 50% quest harian selesai', unlocked: completionRate >= 50 && totalQuests > 0 }
             ];
+
+            const claimBossReward = () => {
+                if (!bossDefeated || bossRewardClaimed) return;
+
+                let nextXp = player.xp + 40;
+                let nextLevel = player.level;
+                let nextXpNeeded = player.xpNeeded;
+
+                while (nextXp >= nextXpNeeded) {
+                    nextXp -= nextXpNeeded;
+                    nextLevel += 1;
+                    nextXpNeeded = Math.round(nextXpNeeded * 1.2);
+                }
+
+                const updatedPlayer = {
+                    ...player,
+                    level: nextLevel,
+                    xp: nextXp,
+                    xpNeeded: nextXpNeeded,
+                    gold: player.gold + 30,
+                    hp: player.maxHp
+                };
+                const updatedLogs = [createSystemLog('Bonus Daily Boss diklaim'), ...logs];
+
+                updateAndSave(updatedPlayer, quests, rewards, updatedLogs);
+                triggerNotification('Daily Boss dikalahkan! +40 XP, +30 Gold');
+            };
 
             // UI Render Login
             if (!token) {
@@ -787,6 +834,48 @@ app.get('/', (req, res) => {
                     {activeTab === 'dashboard' && (
                         <div className="grid lg:grid-cols-[1.35fr_0.85fr] gap-4 mb-6">
                             <div className="space-y-4">
+                                <div className={'bg-slate-900 border rounded-xl p-4 ' + (bossDefeated ? 'border-emerald-500/40 boss-defeated' : 'border-red-500/30 boss-active')}>
+                                    <div className="flex items-start justify-between gap-4 mb-4">
+                                        <div className="flex items-center gap-3">
+                                            <div className={'w-12 h-12 rounded-lg flex items-center justify-center text-2xl border ' + (bossDefeated ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30')}>
+                                                {bossDefeated ? '🏆' : '👹'}
+                                            </div>
+                                            <div>
+                                                <div className="text-[10px] uppercase font-mono font-bold text-red-400">Daily Boss</div>
+                                                <h2 className="text-base font-black text-slate-100">{bossDefeated ? 'Boss Ditaklukkan' : 'Penjaga Kemalasan'}</h2>
+                                                <p className="text-[11px] text-slate-500">{bossDefeated ? 'Semua quest hari ini telah selesai.' : 'Setiap quest selesai mengurangi HP boss.'}</p>
+                                            </div>
+                                        </div>
+                                        <div className="text-right shrink-0">
+                                            <div className="text-[9px] uppercase font-mono text-slate-500">Hadiah</div>
+                                            <div className="text-xs font-black text-amber-300">40 XP + 30 G</div>
+                                        </div>
+                                    </div>
+
+                                    <div className="mb-3">
+                                        <div className="flex justify-between text-[10px] font-mono mb-1">
+                                            <span className={bossDefeated ? 'text-emerald-400' : 'text-red-400'}>BOSS HP</span>
+                                            <span className="text-slate-400">{bossHp}/100</span>
+                                        </div>
+                                        <div className="h-3 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+                                            <div className={'h-full transition-all duration-500 ' + (bossDefeated ? 'bg-emerald-500' : 'bg-gradient-to-r from-red-600 to-orange-400')} style={{ width: bossHp + '%' }}></div>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div className="text-xs text-slate-400">
+                                            Serangan: <span className="font-bold text-slate-200">{completedToday}/{totalQuests} quest</span>
+                                        </div>
+                                        <button
+                                            onClick={claimBossReward}
+                                            disabled={!bossDefeated || bossRewardClaimed}
+                                            className={'px-3 py-2 rounded-lg text-[10px] font-black uppercase transition-colors ' + (bossDefeated && !bossRewardClaimed ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950' : 'bg-slate-800 text-slate-500 cursor-not-allowed')}
+                                        >
+                                            {bossRewardClaimed ? 'Sudah Diklaim' : bossDefeated ? 'Klaim Hadiah' : 'Selesaikan Quest'}
+                                        </button>
+                                    </div>
+                                </div>
+
                                 <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
                                     <div className="flex items-center justify-between mb-4 gap-3">
                                         <div>
