@@ -8,6 +8,7 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'questlife_super_secret_key_13579';
+const APP_TIMEZONE = process.env.APP_TIMEZONE || 'Asia/Bangkok';
 
 // =================================================================
 // KONFIGURASI KONEKSI DATABASE POSTGRESQL
@@ -22,6 +23,24 @@ const pool = new Pool({
 
 app.use(express.json());
 
+const ensureSchema = async () => {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS user_daily_state (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            last_daily_reset DATE NOT NULL
+        )
+    `);
+};
+
+app.get('/health', async (req, res) => {
+    try {
+        await pool.query('SELECT 1');
+        res.json({ status: 'ok', database: 'connected' });
+    } catch (err) {
+        res.status(503).json({ status: 'error', database: 'disconnected' });
+    }
+});
+
 // --- SERVE PWA FILES ---
 // Endpoint agar browser bisa membaca file manifest dan service worker
 app.get('/manifest.json', (req, res) => {
@@ -31,6 +50,10 @@ app.get('/manifest.json', (req, res) => {
 app.get('/service-worker.js', (req, res) => {
     res.setHeader('Content-Type', 'application/javascript');
     res.sendFile(path.join(__dirname, 'service-worker.js'));
+});
+
+app.get('/favicon.ico', (req, res) => {
+    res.status(204).end();
 });
 
 // --- MIDDLEWARE AUTENTIKASI ---
@@ -57,55 +80,77 @@ app.post('/api/auth/register', async (req, res) => {
     if (!email || !password) {
         return res.status(400).json({ error: 'Email dan password wajib diisi.' });
     }
+    if (password.length < 8) {
+        return res.status(400).json({ error: 'Password minimal 8 karakter.' });
+    }
 
+    let client;
     try {
-        const userExists = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+        client = await pool.connect();
+        await client.query('BEGIN');
+        const normalizedEmail = email.trim().toLowerCase();
+        const userExists = await client.query('SELECT id FROM users WHERE email = $1', [normalizedEmail]);
         if (userExists.rows.length > 0) {
+            await client.query('ROLLBACK');
             return res.status(400).json({ error: 'Email sudah terdaftar.' });
         }
 
         const salt = await bcrypt.genSalt(10);
         const hash = await bcrypt.hash(password, salt);
 
-        const newUser = await pool.query(
-            `INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email`,
-            [email, hash]
+        const newUser = await client.query(
+            `INSERT INTO users (email, password_hash)
+             VALUES ($1, $2)
+             RETURNING id, email`,
+            [normalizedEmail, hash]
         );
 
         const userId = newUser.rows[0].id;
+        await client.query(
+            `INSERT INTO user_daily_state (user_id, last_daily_reset)
+             VALUES ($1, (CURRENT_TIMESTAMP AT TIME ZONE $2)::date)`,
+            [userId, APP_TIMEZONE]
+        );
 
-        // Tambahkan quest default
-        await pool.query(`
+        await client.query(`
             INSERT INTO quests (user_id, title, type, difficulty, xp, gold) VALUES
-            (${userId}, 'Olahraga Ringan 15 Minit', 'STR', 'Sedang', 20, 10),
-            (${userId}, 'Membaca Buku Pendidikan / Hobi', 'INT', 'Sedang', 20, 10)
-        `);
+            ($1, 'Olahraga Ringan 15 Menit', 'STR', 'Sedang', 20, 10),
+            ($1, 'Membaca Buku Pendidikan / Hobi', 'INT', 'Sedang', 20, 10)
+        `, [userId]);
 
-        // Tambahkan reward default
-        await pool.query(`
+        await client.query(`
             INSERT INTO rewards (user_id, title, cost) VALUES
-            (${userId}, 'Menonton Movie 1 Episod', 30)
-        `);
+            ($1, 'Menonton Film 1 Episode', 30)
+        `, [userId]);
 
-        // Tambahkan log pertama
-        await pool.query(`
+        await client.query(`
             INSERT INTO logs (user_id, text, log_time) VALUES
-            (${userId}, 'Karakter berjaya dicipta! Selamat mengembara.', 'Sistem')
-        `);
+            ($1, 'Karakter berhasil dibuat! Selamat berpetualang.', 'Sistem')
+        `, [userId]);
 
-        const token = jwt.sign({ id: userId, email: email }, JWT_SECRET, { expiresIn: '30d' });
-        res.json({ token, email });
+        await client.query('COMMIT');
+        const token = jwt.sign({ id: userId, email: normalizedEmail }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ token, email: normalizedEmail });
     } catch (err) {
+        if (client) {
+            try { await client.query('ROLLBACK'); } catch (_) {}
+        }
         console.error(err);
         res.status(500).json({ error: 'Terjadi ralat pada server saat mendaftar.' });
+    } finally {
+        if (client) client.release();
     }
 });
 
 // 2. Login User
 app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body;
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email dan password wajib diisi.' });
+    }
     try {
-        const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+        const normalizedEmail = email.trim().toLowerCase();
+        const result = await pool.query('SELECT * FROM users WHERE email = $1', [normalizedEmail]);
         if (result.rows.length === 0) {
             return res.status(400).json({ error: 'Email atau kata laluan salah.' });
         }
@@ -126,13 +171,53 @@ app.post('/api/auth/login', async (req, res) => {
 
 // 3. Ambil Semua Data Game Player (Sync)
 app.get('/api/game/state', authenticateToken, async (req, res) => {
+    let client;
     try {
+        client = await pool.connect();
         const userId = req.user.id;
-        
-        const userQuery = await pool.query('SELECT id, email, player_name, level, xp, xp_needed, hp, max_hp, gold, stat_str, stat_int, stat_dex, stat_wis FROM users WHERE id = $1', [userId]);
-        const questsQuery = await pool.query('SELECT id, title, type, difficulty, xp, gold, completed_today FROM quests WHERE user_id = $1 ORDER BY id DESC', [userId]);
-        const rewardsQuery = await pool.query('SELECT id, title, cost, count FROM rewards WHERE user_id = $1 ORDER BY id DESC', [userId]);
-        const logsQuery = await pool.query('SELECT id, text, log_time FROM logs WHERE user_id = $1 ORDER BY id DESC LIMIT 50', [userId]);
+
+        await client.query('BEGIN');
+        const resetQuery = await client.query(
+            `SELECT s.last_daily_reset,
+                    (CURRENT_TIMESTAMP AT TIME ZONE $2)::date AS today
+             FROM users u
+             LEFT JOIN user_daily_state s ON s.user_id = u.id
+             WHERE u.id = $1
+             FOR UPDATE OF u`,
+            [userId, APP_TIMEZONE]
+        );
+
+        if (resetQuery.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'User tidak ditemukan.' });
+        }
+
+        const resetState = resetQuery.rows[0];
+        const needsReset = !resetState.last_daily_reset ||
+            new Date(resetState.last_daily_reset).toISOString().slice(0, 10) !==
+            new Date(resetState.today).toISOString().slice(0, 10);
+
+        if (needsReset) {
+            await client.query('UPDATE quests SET completed_today = FALSE WHERE user_id = $1', [userId]);
+            await client.query(
+                `INSERT INTO user_daily_state (user_id, last_daily_reset)
+                 VALUES ($1, $2)
+                 ON CONFLICT (user_id)
+                 DO UPDATE SET last_daily_reset = EXCLUDED.last_daily_reset`,
+                [userId, resetState.today]
+            );
+            await client.query(
+                `INSERT INTO logs (user_id, text, log_time)
+                 VALUES ($1, 'Hari baru dimulai. Quest direset otomatis.', 'Sistem')`,
+                [userId]
+            );
+        }
+
+        const userQuery = await client.query('SELECT id, email, player_name, level, xp, xp_needed, hp, max_hp, gold, stat_str, stat_int, stat_dex, stat_wis FROM users WHERE id = $1', [userId]);
+        const questsQuery = await client.query('SELECT id, title, type, difficulty, xp, gold, completed_today FROM quests WHERE user_id = $1 ORDER BY id DESC', [userId]);
+        const rewardsQuery = await client.query('SELECT id, title, cost, count FROM rewards WHERE user_id = $1 ORDER BY id DESC', [userId]);
+        const logsQuery = await client.query('SELECT id, text, log_time FROM logs WHERE user_id = $1 ORDER BY id DESC LIMIT 50', [userId]);
+        await client.query('COMMIT');
 
         const dbUser = userQuery.rows[0];
         
@@ -176,8 +261,13 @@ app.get('/api/game/state', authenticateToken, async (req, res) => {
             }))
         });
     } catch (err) {
+        if (client) {
+            try { await client.query('ROLLBACK'); } catch (_) {}
+        }
         console.error(err);
         res.status(500).json({ error: 'Gagal mengambil data.' });
+    } finally {
+        if (client) client.release();
     }
 });
 
@@ -186,10 +276,16 @@ app.post('/api/game/save', authenticateToken, async (req, res) => {
     const { player, quests, rewards, logs } = req.body;
     const userId = req.user.id;
 
-    try {
-        await pool.query('BEGIN');
+    if (!player || !Array.isArray(quests) || !Array.isArray(rewards) || !Array.isArray(logs)) {
+        return res.status(400).json({ error: 'Format data tidak valid.' });
+    }
 
-        await pool.query(
+    let client;
+    try {
+        client = await pool.connect();
+        await client.query('BEGIN');
+
+        await client.query(
             `UPDATE users SET 
                 player_name = $1, level = $2, xp = $3, xp_needed = $4, hp = $5, max_hp = $6, gold = $7,
                 stat_str = $8, stat_int = $9, stat_dex = $10, stat_wis = $11
@@ -200,38 +296,42 @@ app.post('/api/game/save', authenticateToken, async (req, res) => {
             ]
         );
 
-        await pool.query('DELETE FROM quests WHERE user_id = $1', [userId]);
+        await client.query('DELETE FROM quests WHERE user_id = $1', [userId]);
         for (const q of quests) {
-            await pool.query(
+            await client.query(
                 `INSERT INTO quests (user_id, title, type, difficulty, xp, gold, completed_today) 
                  VALUES ($1, $2, $3, $4, $5, $6, $7)`,
                 [userId, q.title, q.type, q.difficulty, q.xp, q.gold, q.completedToday]
             );
         }
 
-        await pool.query('DELETE FROM rewards WHERE user_id = $1', [userId]);
+        await client.query('DELETE FROM rewards WHERE user_id = $1', [userId]);
         for (const r of rewards) {
-            await pool.query(
+            await client.query(
                 `INSERT INTO rewards (user_id, title, cost, count) VALUES ($1, $2, $3, $4)`,
                 [userId, r.title, r.cost, r.count]
             );
         }
 
-        await pool.query('DELETE FROM logs WHERE user_id = $1', [userId]);
+        await client.query('DELETE FROM logs WHERE user_id = $1', [userId]);
         const truncatedLogs = logs.slice(0, 50);
         for (const l of truncatedLogs) {
-            await pool.query(
+            await client.query(
                 `INSERT INTO logs (user_id, text, log_time) VALUES ($1, $2, $3)`,
                 [userId, l.text, l.time]
             );
         }
 
-        await pool.query('COMMIT');
+        await client.query('COMMIT');
         res.json({ success: true, message: 'Kemajuan berhasil disimpan!' });
     } catch (err) {
-        await pool.query('ROLLBACK');
+        if (client) {
+            try { await client.query('ROLLBACK'); } catch (_) {}
+        }
         console.error(err);
         res.status(500).json({ error: 'Gagal mengamankan data.' });
+    } finally {
+        if (client) client.release();
     }
 });
 
@@ -290,7 +390,7 @@ app.get('/', (req, res) => {
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useRef } = React;
 
         const Icons = {
             Sword: () => <svg className="w-5 h-5 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M11.5 12.5h3m-3 0V15m0-2.5h-3m3 0V10M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>,
@@ -321,7 +421,12 @@ app.get('/', (req, res) => {
             const [logs, setLogs] = useState([]);
             const [activeTab, setActiveTab] = useState('dashboard');
             const [syncing, setSyncing] = useState(false);
+            const [saveStatus, setSaveStatus] = useState('saved');
             const [notification, setNotification] = useState(null);
+            const saveQueueRef = useRef(null);
+            const saveTimerRef = useRef(null);
+            const savingRef = useRef(false);
+            const tokenRef = useRef(token);
 
             // PWA Install Prompt State
             const [deferredPrompt, setDeferredPrompt] = useState(null);
@@ -333,6 +438,13 @@ app.get('/', (req, res) => {
             const [newQuestDiff, setNewQuestDiff] = useState('Sedang');
             const [newRewardTitle, setNewRewardTitle] = useState('');
             const [newRewardCost, setNewRewardCost] = useState('');
+            const [editingQuestId, setEditingQuestId] = useState(null);
+            const [editQuestTitle, setEditQuestTitle] = useState('');
+            const [editQuestType, setEditQuestType] = useState('INT');
+            const [editQuestDiff, setEditQuestDiff] = useState('Sedang');
+            const [editingRewardId, setEditingRewardId] = useState(null);
+            const [editRewardTitle, setEditRewardTitle] = useState('');
+            const [editRewardCost, setEditRewardCost] = useState('');
 
             const triggerNotification = (msg) => {
                 setNotification(msg);
@@ -364,6 +476,12 @@ app.get('/', (req, res) => {
                 return matched ? matched.type : 'INT';
             };
 
+            const getQuestReward = (difficulty) => {
+                if (difficulty === 'Sulit') return { xp: 40, gold: 20 };
+                if (difficulty === 'Sedang') return { xp: 20, gold: 10 };
+                return { xp: 10, gold: 5 };
+            };
+
             // Capture PWA Install Prompt
             useEffect(() => {
                 window.addEventListener('beforeinstallprompt', (e) => {
@@ -392,10 +510,29 @@ app.get('/', (req, res) => {
 
             // Ambil data saat token tersedia
             useEffect(() => {
+                tokenRef.current = token;
                 if (token) {
                     fetchGameState();
                 }
             }, [token]);
+
+            useEffect(() => {
+                const retryPendingSave = () => {
+                    if (saveQueueRef.current) flushSaveQueue();
+                };
+                const saveBeforeLeaving = () => {
+                    if (document.visibilityState === 'hidden' && saveQueueRef.current) {
+                        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+                        flushSaveQueue();
+                    }
+                };
+                window.addEventListener('online', retryPendingSave);
+                document.addEventListener('visibilitychange', saveBeforeLeaving);
+                return () => {
+                    window.removeEventListener('online', retryPendingSave);
+                    document.removeEventListener('visibilitychange', saveBeforeLeaving);
+                };
+            }, []);
 
             const fetchGameState = async () => {
                 setSyncing(true);
@@ -409,33 +546,77 @@ app.get('/', (req, res) => {
                         setQuests(data.quests);
                         setRewards(data.rewards);
                         setLogs(data.logs);
+                        setSaveStatus('saved');
                     } else if (res.status === 403 || res.status === 401) {
                         handleLogout();
+                    } else {
+                        setSaveStatus('error');
                     }
                 } catch (err) {
                     console.error("Gagal sinkron data:", err);
+                    setSaveStatus('error');
                 } finally {
                     setSyncing(false);
                 }
             };
 
-            const pushToDatabase = async (p, q, r, l) => {
-                if (!token) return;
-                try {
-                    setSyncing(true);
-                    await fetch('/api/game/save', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': 'Bearer ' + token
-                        },
-                        body: JSON.stringify({ player: p, quests: q, rewards: r, logs: l })
-                    });
-                } catch (err) {
-                    console.error("Gagal menyimpan ke DB:", err);
-                } finally {
-                    setSyncing(false);
+            const wait = (milliseconds) => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+            const flushSaveQueue = async () => {
+                if (savingRef.current || !tokenRef.current) return;
+                savingRef.current = true;
+
+                while (saveQueueRef.current) {
+                    const payload = saveQueueRef.current;
+                    saveQueueRef.current = null;
+                    setSaveStatus('saving');
+                    let saved = false;
+
+                    for (let attempt = 0; attempt < 3 && !saved; attempt += 1) {
+                        try {
+                            const res = await fetch('/api/game/save', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': 'Bearer ' + tokenRef.current
+                                },
+                                keepalive: true,
+                                body: JSON.stringify(payload)
+                            });
+
+                            if (res.status === 401 || res.status === 403) {
+                                handleLogout();
+                                savingRef.current = false;
+                                return;
+                            }
+                            if (!res.ok) throw new Error('Save gagal dengan status ' + res.status);
+                            saved = true;
+                        } catch (err) {
+                            console.error('Percobaan save gagal:', err);
+                            if (attempt < 2) await wait(700 * (attempt + 1));
+                        }
+                    }
+
+                    if (!saved) {
+                        if (!saveQueueRef.current) saveQueueRef.current = payload;
+                        setSaveStatus('error');
+                        setTimeout(() => {
+                            if (navigator.onLine && saveQueueRef.current) flushSaveQueue();
+                        }, 5000);
+                        break;
+                    }
+
+                    setSaveStatus(saveQueueRef.current ? 'pending' : 'saved');
                 }
+
+                savingRef.current = false;
+            };
+
+            const scheduleSave = (payload) => {
+                saveQueueRef.current = payload;
+                setSaveStatus('pending');
+                if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+                saveTimerRef.current = setTimeout(flushSaveQueue, 250);
             };
 
             const updateAndSave = (newPlayer, newQuests, newRewards, newLogs) => {
@@ -443,7 +624,7 @@ app.get('/', (req, res) => {
                 setQuests(newQuests);
                 setRewards(newRewards);
                 setLogs(newLogs);
-                pushToDatabase(newPlayer, newQuests, newRewards, newLogs);
+                scheduleSave({ player: newPlayer, quests: newQuests, rewards: newRewards, logs: newLogs });
             };
 
             // --- AUTH LOGIC ---
@@ -483,6 +664,8 @@ app.get('/', (req, res) => {
                 setQuests([]);
                 setRewards([]);
                 setLogs([]);
+                saveQueueRef.current = null;
+                setSaveStatus('saved');
             };
 
             // --- ACTIONS ---
@@ -490,10 +673,7 @@ app.get('/', (req, res) => {
                 e.preventDefault();
                 if (!newQuestTitle.trim()) return;
 
-                let xp = 10; let gold = 5;
-                if (newQuestDiff === 'Sedang') { xp = 20; gold = 10; }
-                else if (newQuestDiff === 'Sulit') { xp = 40; gold = 20; }
-
+                const questReward = getQuestReward(newQuestDiff);
                 const questType = inferQuestType(newQuestTitle, newQuestType);
 
                 const newQ = {
@@ -501,7 +681,9 @@ app.get('/', (req, res) => {
                     title: newQuestTitle,
                     type: questType,
                     difficulty: newQuestDiff,
-                    xp, gold, completedToday: false
+                    xp: questReward.xp,
+                    gold: questReward.gold,
+                    completedToday: false
                 };
 
                 const updatedQ = [newQ, ...quests];
@@ -510,6 +692,29 @@ app.get('/', (req, res) => {
                 updateAndSave(player, updatedQ, rewards, updatedLogs);
                 setNewQuestTitle('');
                 triggerNotification("Quest berhasil ditambahkan!");
+            };
+
+            const startEditQuest = (quest) => {
+                setEditingQuestId(quest.id);
+                setEditQuestTitle(quest.title);
+                setEditQuestType(quest.type);
+                setEditQuestDiff(quest.difficulty);
+            };
+
+            const saveQuestEdit = (id) => {
+                if (!editQuestTitle.trim()) return;
+                const questReward = getQuestReward(editQuestDiff);
+                const updatedQuests = quests.map(q => q.id === id ? {
+                    ...q,
+                    title: editQuestTitle.trim(),
+                    type: editQuestType,
+                    difficulty: editQuestDiff,
+                    xp: questReward.xp,
+                    gold: questReward.gold
+                } : q);
+                updateAndSave(player, updatedQuests, rewards, logs);
+                setEditingQuestId(null);
+                triggerNotification('Quest diperbarui.');
             };
 
             const completeQuest = (id) => {
@@ -554,11 +759,15 @@ app.get('/', (req, res) => {
             };
 
             const deleteQuest = (id) => {
+                const quest = quests.find(q => q.id === id);
+                if (!quest || !window.confirm('Hapus quest "' + quest.title + '"?')) return;
                 const updatedQ = quests.filter(q => q.id !== id);
                 updateAndSave(player, updatedQ, rewards, logs);
+                triggerNotification('Quest dihapus.');
             };
 
             const applyPenalty = () => {
+                if (!window.confirm('Terapkan penalti -15 HP?')) return;
                 const nextHp = Math.max(0, player.hp - 15);
                 let updatedPlayer = { ...player, hp: nextHp };
                 let logText = "Hukuman: Mengabaikan kebiasaan harian (-15 HP)";
@@ -614,15 +823,30 @@ app.get('/', (req, res) => {
             };
 
             const deleteReward = (id) => {
+                const reward = rewards.find(r => r.id === id);
+                if (!reward || !window.confirm('Hapus reward "' + reward.title + '"?')) return;
                 const updatedR = rewards.filter(r => r.id !== id);
                 updateAndSave(player, quests, updatedR, logs);
+                triggerNotification('Reward dihapus.');
             };
 
-            const resetDailyQuests = () => {
-                const updatedQ = quests.map(q => ({ ...q, completedToday: false }));
-                const updatedLogs = [createSystemLog("Hari baru dimulai! Semua Quest Harian telah di-reset."), ...logs];
-                updateAndSave(player, updatedQ, rewards, updatedLogs);
-                triggerNotification("Semua quest harian di-reset!");
+            const startEditReward = (reward) => {
+                setEditingRewardId(reward.id);
+                setEditRewardTitle(reward.title);
+                setEditRewardCost(reward.cost.toString());
+            };
+
+            const saveRewardEdit = (id) => {
+                const cost = parseInt(editRewardCost);
+                if (!editRewardTitle.trim() || !cost || cost < 1) return;
+                const updatedRewards = rewards.map(r => r.id === id ? {
+                    ...r,
+                    title: editRewardTitle.trim(),
+                    cost
+                } : r);
+                updateAndSave(player, quests, updatedRewards, logs);
+                setEditingRewardId(null);
+                triggerNotification('Reward diperbarui.');
             };
 
             const completedToday = quests.filter(q => q.completedToday).length;
@@ -706,6 +930,7 @@ app.get('/', (req, res) => {
                                         type="email" 
                                         value={emailInput} 
                                         onChange={e => setEmailInput(e.target.value)}
+                                        autoComplete="email"
                                         required 
                                         className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-amber-500" 
                                     />
@@ -716,6 +941,8 @@ app.get('/', (req, res) => {
                                         type="password" 
                                         value={passwordInput} 
                                         onChange={e => setPasswordInput(e.target.value)}
+                                        autoComplete={isRegistering ? 'new-password' : 'current-password'}
+                                        minLength={isRegistering ? 8 : undefined}
                                         required 
                                         className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-amber-500" 
                                     />
@@ -757,14 +984,11 @@ app.get('/', (req, res) => {
                     <header className="flex justify-between items-center mb-6">
                         <div>
                             <h1 className="text-xl font-mono font-black text-amber-500">QUESTLIFE</h1>
-                            <div className="text-[9px] text-emerald-400 font-mono uppercase">
-                                {syncing ? 'Sinkronisasi...' : 'Tersambung (Cloud PG)'}
+                            <div className={'text-[9px] font-mono uppercase ' + (saveStatus === 'error' ? 'text-red-400' : saveStatus === 'saved' ? 'text-emerald-400' : 'text-amber-400')}>
+                                {syncing ? 'Mengambil data...' : saveStatus === 'saving' ? 'Menyimpan...' : saveStatus === 'pending' ? 'Menunggu simpan...' : saveStatus === 'error' ? 'Gagal tersimpan - menunggu koneksi' : 'Semua perubahan tersimpan'}
                             </div>
                         </div>
                         <div className="flex gap-2">
-                            <button onClick={resetDailyQuests} className="bg-slate-900 border border-slate-800 hover:border-amber-500 px-3 py-1.5 rounded-lg text-[10px] font-mono font-bold text-amber-500">
-                                Reset Harian
-                            </button>
                             <button onClick={handleLogout} className="bg-slate-900 border border-slate-800 hover:border-red-900 px-3 py-1.5 rounded-lg text-[10px] font-mono font-bold text-red-400">
                                 Log Out
                             </button>
@@ -971,17 +1195,43 @@ app.get('/', (req, res) => {
 
                             <div className="space-y-2">
                                 {quests.map(q => (
-                                    <div key={q.id} className={'bg-slate-900 border border-slate-800 p-3 rounded-xl flex items-center justify-between gap-3 ' + (q.completedToday ? 'opacity-40 line-through' : '')}>
-                                        <div>
-                                            <p className="text-xs font-bold text-slate-200">{q.title}</p>
-                                            <span className="text-[9px] text-amber-500 font-mono font-bold">+{q.xp} XP | +{q.gold} G | {q.type}</span>
-                                        </div>
-                                        <div className="flex gap-2">
-                                            {!q.completedToday && (
-                                                <button onClick={() => completeQuest(q.id)} className="bg-emerald-500 text-slate-950 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase">Selesai</button>
-                                            )}
-                                            <button onClick={() => deleteQuest(q.id)} className="text-slate-600 hover:text-red-400 p-1"><Icons.Trash /></button>
-                                        </div>
+                                    <div key={q.id} className={'bg-slate-900 border border-slate-800 p-3 rounded-xl ' + (q.completedToday ? 'opacity-60' : '')}>
+                                        {editingQuestId === q.id ? (
+                                            <div className="space-y-2">
+                                                <input value={editQuestTitle} onChange={e => setEditQuestTitle(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500" />
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <select value={editQuestType} onChange={e => setEditQuestType(e.target.value)} className="bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-amber-400">
+                                                        <option value="STR">STR - Fisik</option>
+                                                        <option value="INT">INT - Pikiran</option>
+                                                        <option value="DEX">DEX - Kreatif</option>
+                                                        <option value="WIS">WIS - Mental</option>
+                                                    </select>
+                                                    <select value={editQuestDiff} onChange={e => setEditQuestDiff(e.target.value)} className="bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-amber-400">
+                                                        <option value="Mudah">Mudah</option>
+                                                        <option value="Sedang">Sedang</option>
+                                                        <option value="Sulit">Sulit</option>
+                                                    </select>
+                                                </div>
+                                                <div className="flex justify-end gap-2">
+                                                    <button onClick={() => setEditingQuestId(null)} className="px-3 py-1.5 text-[10px] font-bold text-slate-400">Batal</button>
+                                                    <button onClick={() => saveQuestEdit(q.id)} className="bg-amber-500 text-slate-950 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase">Simpan</button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="flex items-center justify-between gap-3">
+                                                <div className={q.completedToday ? 'line-through' : ''}>
+                                                    <p className="text-xs font-bold text-slate-200">{q.title}</p>
+                                                    <span className="text-[9px] text-amber-500 font-mono font-bold">+{q.xp} XP | +{q.gold} G | {q.type}</span>
+                                                </div>
+                                                <div className="flex gap-2 items-center">
+                                                    {!q.completedToday && (
+                                                        <button onClick={() => completeQuest(q.id)} className="bg-emerald-500 text-slate-950 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase">Selesai</button>
+                                                    )}
+                                                    <button onClick={() => startEditQuest(q)} className="text-cyan-400 hover:text-cyan-300 px-1 text-[10px] font-bold">Edit</button>
+                                                    <button onClick={() => deleteQuest(q.id)} title="Hapus quest" className="text-slate-600 hover:text-red-400 p-1"><Icons.Trash /></button>
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                 ))}
                             </div>
@@ -999,15 +1249,29 @@ app.get('/', (req, res) => {
 
                             <div className="space-y-2">
                                 {rewards.map(r => (
-                                    <div key={r.id} className="bg-slate-900 border border-slate-800 p-3 rounded-xl flex items-center justify-between">
-                                        <div>
-                                            <p className="text-xs font-bold text-slate-200">{r.title}</p>
-                                            <span className="text-[10px] text-amber-400 font-mono font-bold">{r.cost} Gold</span>
-                                        </div>
-                                        <div className="flex gap-2">
-                                            <button onClick={() => buyReward(r.id)} className="bg-amber-500 text-slate-950 px-3 py-1 rounded-lg text-[10px] font-black uppercase">Tebus</button>
-                                            <button onClick={() => deleteReward(r.id)} className="text-slate-600 hover:text-red-400 p-1"><Icons.Trash /></button>
-                                        </div>
+                                    <div key={r.id} className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
+                                        {editingRewardId === r.id ? (
+                                            <div className="flex flex-col sm:flex-row gap-2">
+                                                <input value={editRewardTitle} onChange={e => setEditRewardTitle(e.target.value)} className="flex-grow bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" />
+                                                <input type="number" min="1" value={editRewardCost} onChange={e => setEditRewardCost(e.target.value)} className="w-full sm:w-24 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-amber-400" />
+                                                <div className="flex gap-2">
+                                                    <button onClick={() => setEditingRewardId(null)} className="px-3 py-1.5 text-[10px] font-bold text-slate-400">Batal</button>
+                                                    <button onClick={() => saveRewardEdit(r.id)} className="bg-amber-500 text-slate-950 px-3 py-1.5 rounded-lg text-[10px] font-black">Simpan</button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <p className="text-xs font-bold text-slate-200">{r.title}</p>
+                                                    <span className="text-[10px] text-amber-400 font-mono font-bold">{r.cost} Gold</span>
+                                                </div>
+                                                <div className="flex gap-2 items-center">
+                                                    <button onClick={() => buyReward(r.id)} className="bg-amber-500 text-slate-950 px-3 py-1 rounded-lg text-[10px] font-black uppercase">Tebus</button>
+                                                    <button onClick={() => startEditReward(r)} className="text-cyan-400 hover:text-cyan-300 px-1 text-[10px] font-bold">Edit</button>
+                                                    <button onClick={() => deleteReward(r.id)} title="Hapus reward" className="text-slate-600 hover:text-red-400 p-1"><Icons.Trash /></button>
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                 ))}
                             </div>
@@ -1082,6 +1346,15 @@ app.get('/', (req, res) => {
     `);
 });
 
-app.listen(PORT, () => {
-    console.log(`Server QuestLife RPG berjalan di port ${PORT}`);
-});
+const startServer = () => {
+    app.listen(PORT, () => {
+        console.log(`Server QuestLife RPG berjalan di port ${PORT}`);
+    });
+};
+
+ensureSchema()
+    .then(startServer)
+    .catch((err) => {
+        console.error('Peringatan: migrasi database gagal. Periksa permission user PostgreSQL.', err);
+        startServer();
+    });

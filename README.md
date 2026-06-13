@@ -53,7 +53,10 @@ DB_NAME=questlife
 DB_PASSWORD=Kevin123
 DB_PORT=5432
 JWT_SECRET=ganti_dengan_secret_panjang_random
+APP_TIMEZONE=Asia/Bangkok
 ```
+
+`APP_TIMEZONE` dipakai untuk reset quest otomatis ketika tanggal berganti.
 
 ## Deploy dengan PM2
 
@@ -63,6 +66,22 @@ pm2 start server.js --name questlife
 pm2 startup
 pm2 save
 ```
+
+Periksa kondisi aplikasi dan koneksi database:
+
+```bash
+curl http://localhost:3000/health
+```
+
+Respons normal:
+
+```json
+{"status":"ok","database":"connected"}
+```
+
+Saat pertama kali dijalankan, aplikasi membuat tabel `user_daily_state`
+secara otomatis untuk menyimpan tanggal reset harian. User PostgreSQL perlu
+izin `CREATE` pada schema `public`.
 
 ## Nginx reverse proxy
 
