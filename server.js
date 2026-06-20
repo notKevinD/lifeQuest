@@ -352,6 +352,7 @@ app.get('/', (req, res) => {
     <!-- PWA Meta Tags & Manifest -->
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#f59e0b">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3408/3408506.png">
@@ -370,7 +371,7 @@ app.get('/', (req, res) => {
     </script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
     <style>
         @keyframes bossPulse {
             0%, 100% { box-shadow: 0 0 0 rgba(239, 68, 68, 0); }
@@ -389,7 +390,7 @@ app.get('/', (req, res) => {
 
     <div id="root"></div>
 
-   <script type="text/babel" data-presets="env,react">
+    <script type="text/babel" data-presets="env,react">
         const { useState, useEffect, useRef } = React;
 
         const Icons = {
