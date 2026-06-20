@@ -389,7 +389,7 @@ app.get('/', (req, res) => {
 
     <div id="root"></div>
 
-    <script type="text/babel">
+   <script type="text/babel" data-presets="env,react">
         const { useState, useEffect, useRef } = React;
 
         const Icons = {
